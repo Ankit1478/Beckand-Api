@@ -23,7 +23,7 @@ app.use(bodyParser.json());
 app.use('/sound_effects', express.static(path.join(__dirname, 'sound_effects')));
 
 const openai = new OpenAI({
-  apiKey: "sk-proj-VtPUyCDJtZ0iuYfBfajgT3BlbkFJVYtGDSfYeZJiBjB5qxHf",
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
 
