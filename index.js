@@ -7,13 +7,17 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path'); 
 const multer = require('multer');
-const { ref, uploadBytes, getDownloadURL } = require("firebase/storage");
-const { storage, database } = require('./config');
-const { ref: dbRef, set } = require("firebase/database");
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
-ffmpeg.setFfmpegPath(ffmpegPath);
+const admin = require('firebase-admin');
+const serviceAccount = require('./servies.json');
 
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: 'https://fir-b4325-default-rtdb.firebaseio.com',
+   storageBucket: 'fir-b4325.appspot.com'
+});
+
+const adminDatabase = admin.database();
+const adminStorage = admin.storage().bucket();
 
 const app = express();
 const port = 3000;
@@ -75,11 +79,44 @@ const storageMulter = multer.diskStorage({
 
 const upload = multer({ storage: storageMulter });
 
+async function createEmbedding(phrase) {
+  const embeddingResponse = await openai.embeddings.create({
+    model: "text-embedding-3-large",
+    input: phrase,
+    encoding_format: "float",
+  });
+  return embeddingResponse.data[0].embedding;
+}
 
+async function getExistingEmbeddings() {
+  const snapshot = await adminDatabase.ref('soundEffects').once('value');
+  const soundEffects = snapshot.val();
+  if (!soundEffects) return [];
+
+  return Object.keys(soundEffects).map((key) => ({
+    phrase: key,
+    embedding: soundEffects[key].embedding,
+    downloadURL: soundEffects[key].downloadURL,
+  }));
+}
+
+function findSimilarPhrase(existingEmbeddings, newEmbedding) {
+  let maxSimilarity = 0;
+  let similarPhrase = null;
+
+  for (const { phrase, embedding, downloadURL } of existingEmbeddings) {
+    const similarity = cosineSimilarity(embedding, newEmbedding);
+    if (similarity > maxSimilarity) {
+      maxSimilarity = similarity;
+      similarPhrase = { phrase, similarity, downloadURL };
+    }
+  }
+
+  return { maxSimilarity, similarPhrase };
+}
 
 app.post('/save-sound-effects', async (req, res) => {
   const { phrases } = req.body;
-  
   if (!phrases || !Array.isArray(phrases) || phrases.length === 0) {
     return res.status(400).json({ error: 'Phrases are required' });
   }
@@ -98,34 +135,42 @@ app.post('/save-sound-effects', async (req, res) => {
 
         // Convert response data to a Buffer
         const audioBuffer = Buffer.from(response.data, 'binary');
-        const storageRef = ref(storage, `sound_effects/${phrase}.mp3`);
+
+        // Create a unique filename for the sound effect
+        const filename = `sound_effects/${phrase}_${Date.now()}.mp3`;
 
         // Upload the audio file to Firebase Storage
-        await uploadBytes(storageRef, audioBuffer);
+        const file = adminStorage.file(filename);
+        await file.save(audioBuffer, {
+          metadata: {
+            contentType: 'audio/mpeg',
+          },
+          public: true,
+        });
 
         // Get the download URL of the uploaded file
-        const downloadURL = await getDownloadURL(storageRef);
+        const downloadURL = `https://storage.googleapis.com/${adminStorage.name}/${filename}`;
 
-        // Store metadata in Firebase Realtime Database
+        // Create a new SoundEffect object
         const newSoundEffect = {
           phrase: phrase,
-          downloadURL: downloadURL,
           createdAt: new Date().toISOString(),
+          downloadURL: downloadURL,
         };
 
-        const soundEffectRef = dbRef(database, 'soundEffects/' + phrase);
-        await set(soundEffectRef, newSoundEffect);
+        // Store metadata in Firebase Realtime Database
+        const soundEffectRef = adminDatabase.ref('soundEffects/' + phrase);
+        await soundEffectRef.set(newSoundEffect);
 
         return { phrase, downloadURL };
       } catch (err) {
         console.error(`Error processing phrase "${phrase}":`, err.message);
-        throw err; // Re-throw to be caught by Promise.all
+        throw err;
       }
     });
 
-    const results = await Promise.all(soundEffectPromises);
-    res.json({ results });
-
+    const soundEffects = await Promise.all(soundEffectPromises);
+    res.status(200).json({ soundEffects });
   } catch (error) {
     console.error('Error in /save-sound-effects:', error.message);
     res.status(500).json({ error: 'Failed to save sound effects: ' + error.message });
