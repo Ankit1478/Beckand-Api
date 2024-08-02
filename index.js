@@ -27,7 +27,7 @@ app.use(bodyParser.json());
 app.use('/sound_effects', express.static(path.join(__dirname, 'sound_effects')));
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+  apiKey: 'sk-mW7D3O0uIOwK04bChbjsLKjvURvDXBmfnmtxu3NExaT3BlbkFJDe97751O9tJ2Z5QvNJAtEqYuCTKIxlboSnRJU68yAA',
 });
 
 
@@ -79,6 +79,16 @@ const storageMulter = multer.diskStorage({
 
 const upload = multer({ storage: storageMulter });
 
+function cosineSimilarity(vecA, vecB) {
+  if (!vecA || !vecB || vecA.length !== vecB.length) {
+    throw new Error('Vectors are not properly defined or of unequal length');
+  }
+  const dotProduct = vecA.reduce((sum, a, idx) => sum + a * vecB[idx], 0);
+  const magnitudeA = Math.sqrt(vecA.reduce((sum, a) => sum + a * a, 0));
+  const magnitudeB = Math.sqrt(vecB.reduce((sum, b) => sum + b * b, 0));
+  return dotProduct / (magnitudeA * magnitudeB);
+}
+
 async function createEmbedding(phrase) {
   const embeddingResponse = await openai.embeddings.create({
     model: "text-embedding-3-large",
@@ -105,7 +115,13 @@ function findSimilarPhrase(existingEmbeddings, newEmbedding) {
   let similarPhrase = null;
 
   for (const { phrase, embedding, downloadURL } of existingEmbeddings) {
+    if (!embedding || !Array.isArray(embedding)) {
+      continue;
+    }
+
     const similarity = cosineSimilarity(embedding, newEmbedding);
+    console.log(`Comparing with phrase: "${phrase}", Similarity: ${similarity}`);
+
     if (similarity > maxSimilarity) {
       maxSimilarity = similarity;
       similarPhrase = { phrase, similarity, downloadURL };
@@ -122,9 +138,24 @@ app.post('/save-sound-effects', async (req, res) => {
   }
 
   try {
+    const existingEmbeddings = await getExistingEmbeddings();
+
     const soundEffectPromises = phrases.map(async (phrase) => {
       try {
-        // Call external API to generate sound effects
+        const newEmbedding = await createEmbedding(phrase);
+
+        if (!newEmbedding || !Array.isArray(newEmbedding)) {
+          throw new Error(`Invalid embedding for phrase "${phrase}"`);
+        }
+
+        const { maxSimilarity, similarPhrase } = findSimilarPhrase(existingEmbeddings, newEmbedding);
+
+        if (maxSimilarity > 0.9 && similarPhrase) {
+          console.log(`Data already exists for phrase: "${phrase}" with similarity: ${maxSimilarity}. Reusing existing sound effect.`);
+          return { phrase, downloadURL: similarPhrase.downloadURL };
+        }
+
+        console.log(`Creating new data for phrase: "${phrase}". Generating sound effect.`);
         const response = await axios.post('https://pythonapi-cozl.onrender.com/generate_sound_effects', {
           phrases: [phrase],
           duration_seconds: 10,
@@ -133,13 +164,8 @@ app.post('/save-sound-effects', async (req, res) => {
           responseType: 'arraybuffer'
         });
 
-        // Convert response data to a Buffer
         const audioBuffer = Buffer.from(response.data, 'binary');
-
-        // Create a unique filename for the sound effect
         const filename = `sound_effects/${phrase}_${Date.now()}.mp3`;
-
-        // Upload the audio file to Firebase Storage
         const file = adminStorage.file(filename);
         await file.save(audioBuffer, {
           metadata: {
@@ -148,20 +174,24 @@ app.post('/save-sound-effects', async (req, res) => {
           public: true,
         });
 
-        // Get the download URL of the uploaded file
         const downloadURL = `https://storage.googleapis.com/${adminStorage.name}/${filename}`;
-
-        // Create a new SoundEffect object
         const newSoundEffect = {
           phrase: phrase,
           createdAt: new Date().toISOString(),
           downloadURL: downloadURL,
+          embedding: newEmbedding,
         };
 
-        // Store metadata in Firebase Realtime Database
         const soundEffectRef = adminDatabase.ref('soundEffects/' + phrase);
         await soundEffectRef.set(newSoundEffect);
 
+        existingEmbeddings.push({
+          phrase,
+          embedding: newEmbedding,
+          downloadURL,
+        });
+
+        console.log(`New data created and inserted for phrase: "${phrase}".`);
         return { phrase, downloadURL };
       } catch (err) {
         console.error(`Error processing phrase "${phrase}":`, err.message);
