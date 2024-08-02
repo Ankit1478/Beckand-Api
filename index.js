@@ -12,8 +12,8 @@ const serviceAccount = require('./servies.json');
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
-  databaseURL: 'https://fir-b4325-default-rtdb.firebaseio.com',
-   storageBucket: 'fir-b4325.appspot.com'
+  databaseURL: '',
+   storageBucket: ''
 });
 
 const adminDatabase = admin.database();
@@ -27,7 +27,7 @@ app.use(bodyParser.json());
 app.use('/sound_effects', express.static(path.join(__dirname, 'sound_effects')));
 
 const openai = new OpenAI({
-  apiKey: 'sk-mW7D3O0uIOwK04bChbjsLKjvURvDXBmfnmtxu3NExaT3BlbkFJDe97751O9tJ2Z5QvNJAtEqYuCTKIxlboSnRJU68yAA',
+  apiKey: '',
 });
 
 
